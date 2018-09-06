@@ -1,0 +1,727 @@
+---
+title: 'Data Mining Project: Clustering and Playlist Creation'
+author: "Stephen Gianfortoni, Anna Whelan, and Scott Shepard"
+date: "August 6, 2018"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=F}
+library(tidyverse)
+library(caret)
+library(GGally)
+library(leaps)
+library(mclust)
+library(flexmix)
+library(tidyLPA)
+library(RColorBrewer)
+library(hrbrthemes)
+library(forcats)
+```
+
+## Playlist Generation
+
+__Load Data__
+
+```{r}
+music.data <- read.csv('C:/Users/gianf/Documents/MS Analytics/Data Mining/Project_Data.csv')
+music.data$listens <- music.data$listens + 2
+music.data$song_hotttnesss <- music.data$song_hotttnesss + 0.0001 # so that songs do not have a zero chance of being picked
+```
+
+__Exploratory Analysis__
+
+```{r}
+head(music.data[, 14:21], 10)
+
+str(music.data)
+
+summary(music.data)
+```
+
+__Cluster Generation__
+
+```{r}
+set.seed(1027)
+split.index <- createDataPartition(music.data$track_id, p = 0.632, 
+                                  list = F, 
+                                  times = 1)
+
+
+music.k.means <- vector("list", length = 15)
+train <- music.data[split.index, ]
+train$tempo <- (train$tempo-min(train$tempo))/(max(train$tempo)-min(train$tempo))
+
+
+set.seed(1027)
+for (i in 1:15) {
+    music.k.means[[i]] <- kmeans(train[, 14:21], centers = i, nstart = 100, iter.max = 15)
+}
+
+```
+
+__Scree Plot__
+
+
+```{r}
+scree <- data.frame(clusters = rep(NA, 15), within.ss = rep(NA, 15), vaf = rep(NA, 15))
+for (i in 1:15) {
+    scree$clusters[i] <- i
+    scree$within.ss[i] <- music.k.means[[i]]$tot.withinss
+    scree$vaf[i] <-  music.k.means[[i]]$betweenss /music.k.means[[i]]$totss
+}
+
+ggplot(data = scree, aes(x = clusters, y = vaf)) + geom_line() + geom_point()
+```
+
+Based on the Scree plot above. 5-6 clusters appear to be the ideal amount.
+
+__Cluster Center Interpretation__
+
+```{r}
+music.k.means[[6]]$centers
+```
+
+```{r}
+centers.data <- as.data.frame(music.k.means[[6]]$centers)
+centers.data$group <- 1:6
+centers.data$set <- 'train'
+
+centers.data <- centers.data %>% 
+    gather(key = 'variable',
+           value = 'value',
+           factor_key = TRUE,
+           -group,
+           -set)
+
+ggplot(centers.data, aes(x = variable, y = value, group = group)) + geom_col(position = 'dodge') + 
+    geom_col(position = 'dodge') + facet_grid(~group) + coord_flip() + theme(legend.position = 'bottom')
+```
+
+Based on the information above. The 6 clusters could be interpreted as follows:
+
+1. Highly acoustic, highly instrumental. Low energy and dancibility. Low tempo and valence.
+2. High energy, low in speech, acousticness, and instrumentalness.
+3. Low energy acoustic songs. Higher proportion of liveness and speechiness than others.
+4. Dancible, positive, and high energy songs. Mostly instrumental.
+5. High energy, instrumental, acoustic songs
+6. High energy and high instrumentalness. Low valence (emotionally negative)
+
+
+
+__Cluster Stability on Holdout Data__
+
+```{r}
+holdout.k.means <- vector("list", length = 15)
+test <- music.data[-split.index, ]
+test$tempo <- (test$tempo-min(test$tempo))/(max(test$tempo)-min(test$tempo))
+
+set.seed(1027)
+for (i in 1:15) {
+    holdout.k.means[[i]] <- kmeans(test[, 14:21], centers = as.matrix(music.k.means[[i]]$centers), nstart = 1)
+}
+
+
+for (i in 1:15) {
+    scree$holdout.clusters[i] <- i
+    scree$holdout.within.ss[i] <- holdout.k.means[[i]]$tot.withinss
+    scree$holdout.vaf[i] <-  holdout.k.means[[i]]$betweenss /holdout.k.means[[i]]$totss
+}
+```
+
+```{r}
+ggplot(data = scree, aes(x = clusters)) + geom_line(aes(y = holdout.vaf), col = 'red') + 
+    geom_point(aes(y = holdout.vaf), col = 'red') + geom_line(aes(y = vaf), col = 'black') + 
+    geom_point(aes(y = vaf), col = 'black')
+```
+
+```{r}
+print(paste0(scree$holdout.clusters, ': ', scree$holdout.vaf))
+```
+
+__Cluster Comparison__
+
+```{r}
+print(holdout.k.means[[5]]$centers)
+```
+
+```{r}
+centers.test <- as.data.frame(holdout.k.means[[6]]$centers)
+centers.test$group <- 1:6
+centers.test$set <- 'test'
+
+centers.test <- centers.test %>% 
+    gather(key = 'variable',
+           value = 'value',
+           factor_key = TRUE,
+           -group,
+           -set)
+
+centers.combined <- rbind(centers.data, centers.test)
+
+ggplot(centers.combined, aes(x = variable, y = value, group = interaction(group,set), fill = set)) + 
+    geom_col(position = 'dodge') + geom_col(position = 'dodge') + facet_grid(~group) + coord_flip() + 
+    theme(legend.position = 'bottom')
+```
+
+```{r}
+train$cluster <- as.factor(music.k.means[[6]]$cluster)
+
+test$cluster <- as.factor(holdout.k.means[[6]]$cluster)
+
+table(train$cluster, train$genre_top)
+
+prop.table(table(test$cluster))
+
+prop.table(table(music.data$genre_top))
+```
+
+Both the centers and the proportions of the songs in each cluster appear to be very stable.
+
+__Generate Playlists - no genre__
+
+```{r}
+recombined <- rbind(train, test)
+
+ggplot(music.data, aes(song_hotttnesss)) + geom_density(fill = 'chartreuse3') + ggtitle('Music Hotness Density')
+    
+set.seed(1027)
+
+group1 <- sample_n(recombined[recombined$cluster == 1,], 25, weight = song_hotttnesss)
+
+group6 <- sample_n(recombined[recombined$cluster == 6,], 25, weight = song_hotttnesss)
+
+group4 <- sample_n(recombined[recombined$cluster == 4,], 25, weight = song_hotttnesss)
+
+group5 <- sample_n(recombined[recombined$cluster == 5,], 25, weight = song_hotttnesss)
+```
+
+## Genre Specific Playlists
+
+Do the different genres have differing density plots for the type of music they are?
+
+```{r}
+recombined.quant.feat <- recombined[, 11:21]
+
+recombined.quant.feat <- recombined.quant.feat %>% 
+    gather(key = 'feature',
+           value = 'value',
+           factor_key = TRUE,
+           -genre_top,
+           -interest,
+           -song_title)
+
+ggplot(recombined.quant.feat, aes(x = value, y = ..scaled..)) + 
+    geom_density(aes(fill = feature)) + facet_grid(feature~genre_top) + 
+    theme(legend.position = 'bottom')
+```
+
+Based on the plots above, and basic intuition, a hypothesis can be made that different genres should be considered different populations and clustered separately.
+
+```{r}
+table(music.data$genre_top)
+```
+
+The table above shows that the largest groups in the data set are Hip Hop, Electronic, Folk, and Rock. These genres will be clustered separately.
+
+## Rock Cluster
+
+```{r}
+rock <- music.data[music.data$genre_top == 'Rock',]
+
+set.seed(1027)
+rock.split.index <- createDataPartition(rock$track_id, p = 0.632, 
+                                  list = F, 
+                                  times = 1)
+
+rock.train.cluster <- vector("list", length = 15)
+rock.train <- rock[rock.split.index, ]
+rock.train$tempo <- (rock.train$tempo-min(rock.train$tempo))/(max(rock.train$tempo)-min(rock.train$tempo))
+
+
+set.seed(1027)
+for (i in 1:15) {
+    rock.train.cluster[[i]] <- kmeans(rock.train[, 14:21], centers = i, nstart = 100, iter.max = 15)
+}
+
+
+rock.scree <- data.frame(clusters = rep(NA, 15), within.ss = rep(NA, 15), vaf = rep(NA, 15))
+for (i in 1:15) {
+    rock.scree$clusters[i] <- i
+    rock.scree$within.ss[i] <- rock.train.cluster[[i]]$tot.withinss
+    rock.scree$vaf[i] <-  rock.train.cluster[[i]]$betweenss /rock.train.cluster[[i]]$totss
+}
+
+ggplot(data = rock.scree, aes(x = clusters, y = vaf)) + geom_line() + geom_point()
+```
+
+Based on the data set abov, five clusters will be used.
+
+__Cluster Details__
+
+```{r}
+rock.train.cluster[[5]]$centers
+```
+
+```{r}
+rock.centers.data <- as.data.frame(rock.train.cluster[[5]]$centers)
+rock.centers.data$group <- 1:5
+rock.centers.data$set <- 'train'
+
+rock.centers.data <- rock.centers.data %>% 
+    gather(key = 'variable',
+           value = 'value',
+           factor_key = TRUE,
+           -group,
+           -set)
+
+ggplot(rock.centers.data, aes(x = variable, y = value, group = group)) + geom_col(position = 'dodge') + 
+    facet_grid(~group) + coord_flip() + theme(legend.position = 'bottom')
+```
+
+__Test Comparison__
+
+```{r}
+rock.test.cluster <- vector("list", length = 15)
+rock.test <- rock[-rock.split.index, ]
+rock.test$tempo <- (rock.test$tempo-min(rock.test$tempo))/(max(rock.test$tempo)-min(rock.test$tempo))
+
+set.seed(1027)
+for (i in 1:15) {
+    rock.test.cluster[[i]] <- kmeans(rock.test[, 14:21], centers = as.matrix(rock.train.cluster[[i]]$centers), nstart = 1)
+}
+
+
+for (i in 1:15) {
+    rock.scree$holdout.clusters[i] <- i 
+    rock.scree$holdout.within.ss[i] <- rock.test.cluster[[i]]$tot.withinss
+    rock.scree$holdout.vaf[i] <-  rock.test.cluster[[i]]$betweenss / rock.test.cluster[[i]]$totss
+}
+```
+
+```{r}
+ggplot(data = rock.scree, aes(x = clusters)) + geom_line(aes(y = holdout.vaf), col = 'red') + 
+    geom_point(aes(y = holdout.vaf), col = 'red') + geom_line(aes(y = vaf), col = 'black') + 
+    geom_point(aes(y = vaf), col = 'black')
+```
+
+```{r}
+rock.centers.test <- as.data.frame(rock.test.cluster[[5]]$centers)
+rock.centers.test$group <- 1:5
+rock.centers.test$set <- 'test'
+
+rock.centers.test <- rock.centers.test %>% 
+    gather(key = 'variable',
+           value = 'value',
+           factor_key = TRUE,
+           -group,
+           -set)
+
+rock.centers.combined <- rbind(rock.centers.data, rock.centers.test)
+
+ggplot(rock.centers.combined, aes(x = variable, y = value, group = interaction(group,set), fill = set)) + 
+    geom_col(position = 'dodge') + facet_grid(~group) + coord_flip() + 
+    theme(legend.position = 'bottom')
+```
+
+Export cluster
+
+```{r}
+saveRDS(rock.train.cluster, file = 'rock_clusters.rds')
+```
+
+## Electronic Cluster
+
+```{r}
+electronic <- music.data[music.data$genre_top == 'Electronic',]
+
+set.seed(1027)
+electronic.split.index <- createDataPartition(electronic$track_id, p = 0.632, 
+                                  list = F, 
+                                  times = 1)
+
+electronic.train.cluster <- vector("list", length = 9)
+electronic.train <- electronic[electronic.split.index, ]
+electronic.train$tempo <- (electronic.train$tempo-min(electronic.train$tempo))/(max(electronic.train$tempo)-min(electronic.train$tempo))
+
+
+set.seed(1027)
+for (i in 1:15) {
+    electronic.train.cluster[[i]] <- kmeans(electronic.train[, 14:21], centers = i, nstart = 100, iter.max = 15)
+}
+
+
+electronic.scree <- data.frame(clusters = rep(NA, 15), within.ss = rep(NA, 15), vaf = rep(NA, 15))
+for (i in 1:15) {
+    electronic.scree$clusters[i] <- i
+    electronic.scree$within.ss[i] <- electronic.train.cluster[[i]]$tot.withinss
+    electronic.scree$vaf[i] <-  electronic.train.cluster[[i]]$betweenss /electronic.train.cluster[[i]]$totss
+}
+
+ggplot(data = electronic.scree, aes(x = clusters, y = vaf)) + geom_line() + geom_point()
+```
+
+Based on the data set abov, five clusters will be used.
+
+__Cluster Details__
+
+```{r}
+electronic.train.cluster[[5]]$centers
+```
+
+```{r}
+electronic.centers.data <- as.data.frame(electronic.train.cluster[[5]]$centers)
+electronic.centers.data$group <- 1:5
+electronic.centers.data$set <- 'train'
+
+electronic.centers.data <- electronic.centers.data %>% 
+    gather(key = 'variable',
+           value = 'value',
+           factor_key = TRUE,
+           -group,
+           -set)
+
+ggplot(electronic.centers.data, aes(x = variable, y = value, group = group)) + geom_col(position = 'dodge') + 
+    facet_grid(~group) + coord_flip() + theme(legend.position = 'bottom')
+```
+
+```{r}
+electronic.test.cluster <- vector("list", length = 15)
+electronic.test <- electronic[-electronic.split.index, ]
+electronic.test$tempo <- (electronic.test$tempo-min(electronic.test$tempo))/(max(electronic.test$tempo)-min(electronic.test$tempo))
+
+set.seed(1027)
+for (i in 1:15) {
+    electronic.test.cluster[[i]] <- kmeans(electronic.test[, 14:21], centers = as.matrix(electronic.train.cluster[[i]]$centers), nstart = 1)
+}
+
+
+for (i in 1:15) {
+    electronic.scree$holdout.clusters[i] <- i 
+    electronic.scree$holdout.within.ss[i] <- electronic.test.cluster[[i]]$tot.withinss
+    electronic.scree$holdout.vaf[i] <-  electronic.test.cluster[[i]]$betweenss / electronic.test.cluster[[i]]$totss
+}
+```
+
+```{r}
+ggplot(data = electronic.scree, aes(x = clusters)) + geom_line(aes(y = holdout.vaf), col = 'red') + 
+    geom_point(aes(y = holdout.vaf), col = 'red') + geom_line(aes(y = vaf), col = 'black') + 
+    geom_point(aes(y = vaf), col = 'black')
+
+```
+
+```{r}
+electronic.centers.test <- as.data.frame(electronic.test.cluster[[5]]$centers)
+electronic.centers.test$group <- 1:5
+electronic.centers.test$set <- 'test'
+
+electronic.centers.test <- electronic.centers.test %>% 
+    gather(key = 'variable',
+           value = 'value',
+           factor_key = TRUE,
+           -group,
+           -set)
+
+electronic.centers.combined <- rbind(electronic.centers.data, electronic.centers.test)
+
+ggplot(electronic.centers.combined, aes(x = variable, y = value, group = interaction(group,set), fill = set)) + 
+    geom_col(position = 'dodge') + facet_grid(~group) + coord_flip() + 
+    theme(legend.position = 'bottom')
+```
+
+Export cluster
+
+```{r}
+saveRDS(electronic.train.cluster, file = 'electronic_clusters.rds')
+```
+
+## Hip Hop Cluster
+
+```{r}
+hiphop <- music.data[music.data$genre_top == 'Hip-Hop',]
+
+set.seed(1027)
+hiphop.split.index <- createDataPartition(hiphop$track_id, p = 0.632, 
+                                  list = F, 
+                                  times = 1)
+
+hiphop.train.cluster <- vector("list", length = 9)
+hiphop.train <- hiphop[hiphop.split.index, ]
+hiphop.train$tempo <- (hiphop.train$tempo-min(hiphop.train$tempo))/(max(hiphop.train$tempo)-min(hiphop.train$tempo))
+
+
+set.seed(1027)
+for (i in 1:15) {
+    hiphop.train.cluster[[i]] <- kmeans(hiphop.train[, 14:21], centers = i, nstart = 100, iter.max = 15)
+}
+
+
+hiphop.scree <- data.frame(clusters = rep(NA, 15), within.ss = rep(NA, 15), vaf = rep(NA, 15))
+for (i in 1:15) {
+    hiphop.scree$clusters[i] <- i
+    hiphop.scree$within.ss[i] <- hiphop.train.cluster[[i]]$tot.withinss
+    hiphop.scree$vaf[i] <-  hiphop.train.cluster[[i]]$betweenss / hiphop.train.cluster[[i]]$totss
+}
+
+ggplot(data = hiphop.scree, aes(x = clusters, y = vaf)) + geom_line() + geom_point()
+```
+
+Based on the data set abov, five clusters will be used.
+
+__Cluster Details__
+
+```{r}
+hiphop.train.cluster[[5]]$centers
+```
+
+```{r}
+hiphop.centers.data <- as.data.frame(hiphop.train.cluster[[5]]$centers)
+hiphop.centers.data$group <- 1:5
+hiphop.centers.data$set <- 'train'
+
+hiphop.centers.data <- hiphop.centers.data %>% 
+    gather(key = 'variable',
+           value = 'value',
+           factor_key = TRUE,
+           -group,
+           -set)
+
+ggplot(hiphop.centers.data, aes(x = variable, y = value, group = group)) + geom_col(position = 'dodge') + 
+    facet_grid(~group) + coord_flip() + theme(legend.position = 'bottom')
+```
+
+```{r}
+hiphop.test.cluster <- vector("list", length = 15)
+hiphop.test <- hiphop[-hiphop.split.index, ]
+hiphop.test$tempo <- (hiphop.test$tempo-min(hiphop.test$tempo))/(max(hiphop.test$tempo)-min(hiphop.test$tempo))
+
+set.seed(1027)
+for (i in 1:15) {
+    hiphop.test.cluster[[i]] <- kmeans(hiphop.test[, 14:21], centers = as.matrix(hiphop.train.cluster[[i]]$centers), nstart = 1)
+}
+
+
+for (i in 1:15) {
+    hiphop.scree$holdout.clusters[i] <- i 
+    hiphop.scree$holdout.within.ss[i] <- hiphop.test.cluster[[i]]$tot.withinss
+    hiphop.scree$holdout.vaf[i] <-  hiphop.test.cluster[[i]]$betweenss / hiphop.test.cluster[[i]]$totss
+}
+```
+
+```{r}
+ggplot(data = hiphop.scree, aes(x = clusters)) + geom_line(aes(y = holdout.vaf), col = 'red') + 
+    geom_point(aes(y = holdout.vaf), col = 'red') + geom_line(aes(y = vaf), col = 'black') + 
+    geom_point(aes(y = vaf), col = 'black')
+
+```
+
+```{r}
+hiphop.centers.test <- as.data.frame(hiphop.test.cluster[[5]]$centers)
+hiphop.centers.test$group <- 1:5
+hiphop.centers.test$set <- 'test'
+
+hiphop.centers.test <- hiphop.centers.test %>% 
+    gather(key = 'variable',
+           value = 'value',
+           factor_key = TRUE,
+           -group,
+           -set)
+
+hiphop.centers.combined <- rbind(hiphop.centers.data, hiphop.centers.test)
+
+ggplot(hiphop.centers.combined, aes(x = variable, y = value, group = interaction(group,set), fill = set)) + 
+    geom_col(position = 'dodge') + facet_grid(~group) + coord_flip() + 
+    theme(legend.position = 'bottom')
+```
+
+Interestingly, the acousticness and instrumentalness seem to be the two driving factors here.
+
+Export cluster
+
+```{r}
+saveRDS(hiphop.train.cluster, file = 'hiphop_clusters.rds')
+```
+
+## Blues / Folk
+
+```{r}
+music.data$genre_top <- recode(music.data$genre_top, 'Folk' = 'Blues/Folk')
+music.data$genre_top <- recode(music.data$genre_top, 'Blues' = 'Blues/Folk')
+```
+
+```{r}
+folk <- music.data[music.data$genre_top == 'Blues/Folk',]
+
+set.seed(1027)
+folk.split.index <- createDataPartition(folk$track_id, p = 0.632, 
+                                  list = F, 
+                                  times = 1)
+
+folk.train.cluster <- vector("list", length = 9)
+folk.train <- folk[folk.split.index, ]
+folk.train$tempo <- (folk.train$tempo-min(folk.train$tempo))/(max(folk.train$tempo)-min(folk.train$tempo))
+
+
+set.seed(1027)
+for (i in 1:15) {
+    folk.train.cluster[[i]] <- kmeans(folk.train[, 14:21], centers = i, nstart = 100, iter.max = 15)
+}
+
+
+folk.scree <- data.frame(clusters = rep(NA, 15), within.ss = rep(NA, 15), vaf = rep(NA, 15))
+for (i in 1:15) {
+    folk.scree$clusters[i] <- i
+    folk.scree$within.ss[i] <- folk.train.cluster[[i]]$tot.withinss
+    folk.scree$vaf[i] <-  folk.train.cluster[[i]]$betweenss / folk.train.cluster[[i]]$totss
+}
+
+ggplot(data = folk.scree, aes(x = clusters, y = vaf)) + geom_line() + geom_point()
+```
+
+Based on the data set abov, five clusters will be used.
+
+__Cluster Details__
+
+```{r}
+folk.train.cluster[[5]]$centers
+```
+
+```{r}
+folk.centers.data <- as.data.frame(folk.train.cluster[[5]]$centers)
+folk.centers.data$group <- 1:5
+folk.centers.data$set <- 'train'
+
+folk.centers.data <- folk.centers.data %>% 
+    gather(key = 'variable',
+           value = 'value',
+           factor_key = TRUE,
+           -group,
+           -set)
+
+ggplot(folk.centers.data, aes(x = variable, y = value, group = group)) + geom_col(position = 'dodge') + 
+    facet_grid(~group) + coord_flip() + theme(legend.position = 'bottom')
+```
+
+```{r}
+folk.test.cluster <- vector("list", length = 15)
+folk.test <- folk[-folk.split.index, ]
+folk.test$tempo <- (folk.test$tempo-min(folk.test$tempo))/(max(folk.test$tempo)-min(folk.test$tempo))
+
+set.seed(1027)
+for (i in 1:15) {
+    folk.test.cluster[[i]] <- kmeans(folk.test[, 14:21], centers = as.matrix(folk.train.cluster[[i]]$centers), nstart = 1)
+}
+
+
+for (i in 1:15) {
+    folk.scree$holdout.clusters[i] <- i 
+    folk.scree$holdout.within.ss[i] <- folk.test.cluster[[i]]$tot.withinss
+    folk.scree$holdout.vaf[i] <-  folk.test.cluster[[i]]$betweenss / folk.test.cluster[[i]]$totss
+}
+```
+
+```{r}
+ggplot(data = folk.scree, aes(x = clusters)) + geom_line(aes(y = holdout.vaf), col = 'red') + 
+    geom_point(aes(y = holdout.vaf), col = 'red') + geom_line(aes(y = vaf), col = 'black') + 
+    geom_point(aes(y = vaf), col = 'black')
+
+```
+
+```{r}
+folk.centers.test <- as.data.frame(folk.test.cluster[[5]]$centers)
+folk.centers.test$group <- 1:5
+folk.centers.test$set <- 'test'
+
+folk.centers.test <- folk.centers.test %>% 
+    gather(key = 'variable',
+           value = 'value',
+           factor_key = TRUE,
+           -group,
+           -set)
+
+folk.centers.combined <- rbind(folk.centers.data, folk.centers.test)
+
+ggplot(folk.centers.combined, aes(x = variable, y = value, group = interaction(group,set), fill = set)) + 
+    geom_col(position = 'dodge') + facet_grid(~group) + coord_flip() + 
+    theme(legend.position = 'bottom')
+```
+
+Export cluster
+
+```{r}
+saveRDS(folk.train.cluster, file = 'folk_clusters.rds')
+```
+
+
+## LPA
+
+Latent profile analysis is similar to Latent Class Analysis, but works for quantitative data. We will be testing this using the MClust package.
+
+```{r}
+explore_model_fit <- function(df, n_profiles_range = 1:9, model_names = c("EII", "VVI", "EEE", "VVV")) {
+    x <- mclustBIC(df, G = n_profiles_range, modelNames = model_names)
+    y <- x %>%
+        as.data.frame.matrix() %>%
+        rownames_to_column("n_profiles") %>%
+        rename(`Constrained variance, fixed covariance` = EII, 
+               `Freed variance, fixed covariance` = VVI,
+               `Constrained variance, constrained covariance` = EEE,
+               `Freed variance, freed covariance` = VVV)
+    y
+}
+
+fit_output <- explore_model_fit(train[, 14:21], n_profiles_range = 1:9)
+
+to_plot <- fit_output %>%
+    gather(`Covariance matrix structure`, val, -n_profiles) %>% 
+    mutate(`Covariance matrix structure` = as.factor(`Covariance matrix structure`),
+           val = abs(val)) # this is to make the BIC values positive (to align with more common formula / interpretation of BIC)
+
+to_plot$`Covariance matrix structure` <- fct_relevel(to_plot$`Covariance matrix structure`,
+                                                     "Constrained variance, fixed covariance",
+                                                     "Freed variance, fixed covariance",
+                                                     "Constrained variance, constrained covariance",
+                                                     "Freed variance, freed covariance")
+
+
+ggplot(to_plot, aes(x = n_profiles, y = val, color = `Covariance matrix structure`, group = `Covariance matrix structure`)) +
+    geom_line() +
+    geom_point() +
+    ylab("BIC")
+
+Music.LPA <- Mclust(train[, 14:21], G = 6, modelNames = 'EII')
+summary(Music.LPA)
+lpa.center <- t(Music.LPA$parameters$mean)
+row.order <- c( 3, 4, 6, 2, 1, 5)
+lpa.center <- as.data.frame(lpa.center[row.order, , drop = F])
+```
+
+```{r}
+lpa.center$group <- 1:6
+lpa.center$set <- 'lpa'
+
+lpa.center <- lpa.center %>% 
+    gather(key = 'variable',
+           value = 'value',
+           factor_key = TRUE,
+           -group,
+           -set)
+
+centers.clust.lpa <- rbind(centers.data, lpa.center)
+
+ggplot(centers.clust.lpa, aes(x = variable, y = value, group = interaction(group,set), fill = set)) + 
+    geom_col(position = 'dodge') + geom_col(position = 'dodge') + facet_grid(~group) + coord_flip() + 
+    theme(legend.position = 'bottom')
+```
+
+```{r}
+table(Music.LPA$classification)
+table(music.k.means[[6]]$cluster)
+
+table(Music.LPA$classification, music.k.means[[6]]$cluster)
+```

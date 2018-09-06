@@ -1,0 +1,308 @@
+---
+title: "Data Mining Project: Genre Prediction"
+author: "Stephen Gianfortoni, Anna Whelan, and Scott Shepard"
+date: "August 2, 2018"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r, include=F}
+library(caret)
+library(tidyverse)
+```
+
+## Load Data
+
+International and Experimental songs were dropped. They both had low volume, and are defined by features besides their inherent musical features, so they provided instrinsic issues to classification. An alternative sample set that had an even number of each genre would be prefereable, but unfortunately we did not have this data.
+
+```{r}
+set.seed(1)
+datapath <- 'C:/Users/gianf/Documents/MS Analytics/Data Mining/'
+full.data <- read.csv(paste0(datapath, 'Project_Data.csv'))
+
+empty.genre <- which(full.data$genre_top=="")
+data.empty.genre <- full.data[full.data$genre_top == '', ]
+
+international.genre <- which(full.data$genre_top=="International")
+experimental.genre <- which(full.data$genre_top=="Experimental")
+blues.genre <- which(full.data$genre_top=="Blues")
+full.data$genre_top[blues.genre] <- "Folk"
+full.data <- full.data[-c(empty.genre, international.genre, experimental.genre),]
+
+full.data <- droplevels(full.data)
+levels(full.data$genre_top)[3] <- "Folk/Blues"
+
+samp <- sample(1:nrow(full.data), size=0.7*nrow(full.data), replace=FALSE)
+
+d.train <- full.data[samp,]
+d.test <- full.data[-samp,]
+
+d.train.trim <- d.train[, c(11, 14, 15, 16, 17, 18, 19, 20, 21)]
+d.test.trim <- d.test[, c(11, 14, 15, 16, 17, 18, 19, 20, 21)]
+
+```
+
+
+## Decision Tree
+
+```{r}
+library(rpart)
+#d.train.trim.2 <- d.train.trim[, -c(6, 8, 9)]
+
+train.tree <- rpart(d.train.trim, control=rpart.control(cp=0, minsplit=25, xval=20, maxsurrogate=0))
+
+#plot(train.tree, main="Classification Tree: Music Data", col=3, compress=TRUE, branch=0.2, uniform=TRUE)
+#text(train.tree, cex=0.8, col=4, fancy=TRUE, fwidth=0.1, fheight=0.1, bg=c(5))
+
+#plotcp(train.tree, minline=TRUE)
+printcp(train.tree)
+
+```
+
+```{r}
+#pruned tree
+train.tree.pruned <- rpart(d.train.trim, control=rpart.control(cp=9.6360e-04, minsplit=25, xval=20, maxsurrogate=0))
+
+#plot(train.tree.pruned, main="Classification Tree: Music Data", col=3, compress=TRUE, branch=0.9, uniform=TRUE)
+#text(train.tree.pruned, cex=0.8, col=4, fancy=TRUE, fwidth=0.1, fheight=0.1, bg=c(5))
+
+```
+
+__Train Accuracy__
+
+```{r}
+
+conf.train <- round(prop.table(table(d.train.trim$genre_top, predict(train.tree.pruned, type="class")),1),2)
+train.accuracy <- diag(conf.train)
+
+conf.train
+train.accuracy
+```
+
+__Test Accuracy__
+
+```{r}
+test.tree <- predict(train.tree.pruned, newdata = d.test, type = 'class')
+
+conf.test <- round(prop.table(table(d.test.trim$genre_top, test.tree),1),2)
+test.accuracy <- diag(conf.test)
+
+conf.test
+test.accuracy
+```
+
+## Prediction of unlabeled genres
+
+```{r}
+#predict genre for empty
+
+data.empty.genre$predicted.genre <- predict(train.tree.pruned, newdata = data.empty.genre, type="class")
+
+summary(data.empty.genre$predicted.genre)
+
+rock.pred <- data.empty.genre[data.empty.genre$predicted.genre == 'Rock',]
+rock.pred$tempo <- (rock.pred$tempo-min(rock.pred$tempo))/(max(rock.pred$tempo)-min(rock.pred$tempo))
+
+hiphop.pred <- data.empty.genre[data.empty.genre$predicted.genre == 'Hip-Hop',]
+hiphop.pred$tempo <- (hiphop.pred$tempo-min(hiphop.pred$tempo))/(max(hiphop.pred$tempo)-min(hiphop.pred$tempo))
+
+electronic.pred <- data.empty.genre[data.empty.genre$predicted.genre == 'Electronic',]
+electronic.pred$tempo <- (electronic.pred$tempo-min(electronic.pred$tempo))/(max(electronic.pred$tempo)-min(electronic.pred$tempo))
+
+folk.pred <- data.empty.genre[data.empty.genre$predicted.genre == 'Folk/Blues',]
+folk.pred$tempo <- (folk.pred$tempo-min(folk.pred$tempo))/(max(folk.pred$tempo)-min(folk.pred$tempo))
+
+
+```
+
+Importing the clusters allows us to see if the clusters match.
+
+Rock:
+
+```{r}
+rock.clusters <- readRDS(file = 'rock_clusters.rds')
+```
+
+```{r}
+rock.pred.cluster <- kmeans(rock.pred[, 14:21], centers = as.matrix(rock.clusters[[5]]$centers), nstart = 1)
+
+rock.clusters[[5]]$centers
+
+rock.pred.cluster$centers
+```
+
+Plot center comparisons
+
+```{r}
+
+rock.train <- data.frame(rock.clusters[[5]]$centers)
+rock.train$group <- 1:5
+rock.train$set <- 'train'
+rock.train <- rock.train %>% 
+    gather(key = 'variable',
+           value = 'value',
+           factor_key = TRUE,
+           -group,
+           -set)
+
+rock.unk <- data.frame(rock.pred.cluster$centers)
+rock.unk$group <- 1:5
+rock.unk$set <- 'unknown'
+rock.unk <- rock.unk %>% 
+    gather(key = 'variable',
+           value = 'value',
+           factor_key = TRUE,
+           -group,
+           -set)
+
+rock.graph <- rbind(rock.unk, rock.train)
+
+ggplot(rock.graph, aes(x = variable, y = value, group = interaction(group,set), fill = set)) + 
+    geom_col(position = 'dodge') + geom_col(position = 'dodge') + facet_grid(~group) + coord_flip() + 
+    theme(legend.position = 'bottom')
+
+```
+
+Hip Hop
+
+```{r}
+hiphop.clusters <- readRDS(file = 'hiphop_clusters.rds')
+```
+
+```{r}
+hiphop.pred.cluster <- kmeans(hiphop.pred[, 14:21], centers = as.matrix(hiphop.clusters[[5]]$centers), nstart = 1)
+
+hiphop.clusters[[5]]$centers
+
+hiphop.pred.cluster$centers
+```
+
+Plot center comparisons
+
+```{r}
+
+hiphop.train <- data.frame(hiphop.clusters[[5]]$centers)
+hiphop.train$group <- 1:5
+hiphop.train$set <- 'train'
+hiphop.train <- hiphop.train %>% 
+    gather(key = 'variable',
+           value = 'value',
+           factor_key = TRUE,
+           -group,
+           -set)
+
+hiphop.unk <- data.frame(hiphop.pred.cluster$centers)
+hiphop.unk$group <- 1:5
+hiphop.unk$set <- 'unknown'
+hiphop.unk <- hiphop.unk %>% 
+    gather(key = 'variable',
+           value = 'value',
+           factor_key = TRUE,
+           -group,
+           -set)
+
+hiphop.graph <- rbind(hiphop.unk, hiphop.train)
+
+ggplot(hiphop.graph, aes(x = variable, y = value, group = interaction(group,set), fill = set)) + 
+    geom_col(position = 'dodge') + geom_col(position = 'dodge') + facet_grid(~group) + coord_flip() + 
+    theme(legend.position = 'bottom')
+
+```
+
+Notice that there are significant differences in clusters 1 and 5. These may be classified incorrectly.
+
+Electronic
+
+```{r}
+electronic.clusters <- readRDS(file = 'electronic_clusters.rds')
+```
+
+```{r}
+electronic.pred.cluster <- kmeans(electronic.pred[, 14:21], centers = as.matrix(electronic.clusters[[5]]$centers), nstart = 1)
+
+electronic.clusters[[5]]$centers
+
+electronic.pred.cluster$centers
+```
+
+Plot center comparisons
+
+```{r}
+
+electronic.train <- data.frame(electronic.clusters[[5]]$centers)
+electronic.train$group <- 1:5
+electronic.train$set <- 'train'
+electronic.train <- electronic.train %>% 
+    gather(key = 'variable',
+           value = 'value',
+           factor_key = TRUE,
+           -group,
+           -set)
+
+electronic.unk <- data.frame(electronic.pred.cluster$centers)
+electronic.unk$group <- 1:5
+electronic.unk$set <- 'unknown'
+electronic.unk <- electronic.unk %>% 
+    gather(key = 'variable',
+           value = 'value',
+           factor_key = TRUE,
+           -group,
+           -set)
+
+electronic.graph <- rbind(electronic.unk, electronic.train)
+
+ggplot(electronic.graph, aes(x = variable, y = value, group = interaction(group,set), fill = set)) + 
+    geom_col(position = 'dodge') + geom_col(position = 'dodge') + facet_grid(~group) + coord_flip() + 
+    theme(legend.position = 'bottom')
+
+```
+
+Folk
+
+```{r}
+folk.clusters <- readRDS(file = 'folk_clusters.rds')
+```
+
+The clusters break down below? Maybe influx of other high accoustice genres? Or the classifier only identifies Folk as being highly acoustic.
+
+```{r}
+set.seed(1027)
+folk.pred.cluster <- kmeans(folk.pred[, 14:21], centers = 5, nstart = 10)
+
+folk.clusters[[5]]$centers
+
+folk.pred.cluster$centers
+```
+
+Plot center comparisons
+
+```{r}
+
+folk.train <- data.frame(folk.clusters[[5]]$centers)
+folk.train$group <- 1:5
+folk.train$set <- 'train'
+folk.train <- folk.train %>% 
+    gather(key = 'variable',
+           value = 'value',
+           factor_key = TRUE,
+           -group,
+           -set)
+
+folk.unk <- data.frame(folk.pred.cluster$centers)
+folk.unk$group <- 1:5
+folk.unk$set <- 'unknown'
+folk.unk <- folk.unk %>% 
+    gather(key = 'variable',
+           value = 'value',
+           factor_key = TRUE,
+           -group,
+           -set)
+
+folk.graph <- rbind(folk.unk, folk.train)
+
+ggplot(folk.graph, aes(x = variable, y = value, group = interaction(group,set), fill = set)) + 
+    geom_col(position = 'dodge') + geom_col(position = 'dodge') + facet_grid(~group) + coord_flip() + 
+    theme(legend.position = 'bottom')
+
+```
